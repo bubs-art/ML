@@ -1,57 +1,118 @@
-# Swin-T Pediatric Pneumonia Paper: Project README
+# Pneumonia Detection from Chest X-rays with a Swin Transformer
 
-LaTeX source and supporting code for a research paper on fine-tuning an ImageNet-pretrained **Swin-T** to classify pediatric chest X-rays (NORMAL vs. PNEUMONIA) on the Kermany dataset, using a patient-level split and a recall-oriented threshold.
+Fine-tunes an ImageNet-pretrained **Swin-T** (Swin Transformer, tiny) to classify pediatric chest X-rays as **NORMAL** or **PNEUMONIA**. The pipeline uses a **patient-level** train/validation split to avoid data leakage, a class-weighted loss for the imbalanced data, and a **recall-oriented decision threshold** chosen on validation data. The held-out test set is evaluated once, and Grad-CAM heatmaps are produced for inspection.
 
-Source notebook: `swin_pneumonia (1).ipynb`
+> **Not a medical device.** This is a research and educational project. It has not been clinically validated and must not be used for diagnosis or treatment decisions.
 
-## Files
+## Results (held-out test set, 624 images)
 
-| File | Purpose |
+| Metric | Value |
 |---|---|
-| `swin_pneumonia_paper_overleaf.zip` | The Overleaf project (upload this) |
-| `main.tex` | Paper source (also inside the zip) |
-| `references.bib` | 17 BibTeX entries (inside the zip) |
-| `figures/` | `fig_training.png`, `fig_confusion.png`, `fig_threshold.png`, `fig_gradcam.png`, taken from the notebook's saved outputs (inside the zip) |
-| `swin_pneumonia_paper_preview.pdf` | Compiled preview of the current draft |
-| `swin_extra_experiments.py` | Code for the experiments the paper still needs |
+| Recall (sensitivity) | 0.995 (388 / 390) |
+| Specificity | 0.709 (166 / 234) |
+| Precision | 0.851 |
+| NPV | 0.988 |
+| Accuracy | 0.888 |
+| F1 | 0.917 |
+| ROC-AUC | 0.981 |
+| Decision threshold | 0.363 (chosen on validation) |
+| Training time | about 16.9 min |
 
-## Using the project in Overleaf
+Confusion matrix (`[[TN, FP], [FN, TP]]`): `[[166, 68], [2, 388]]`
 
-1. **New Project → Upload Project**, then select the zip.
-2. Compiler: **pdfLaTeX** (default). Main document: `main.tex`.
-3. Bibliography uses `natbib` + BibTeX (`unsrtnat`); Overleaf builds it automatically.
+These come from a single run with seed 42. Validation ROC-AUC (0.999) is noticeably higher than test ROC-AUC (0.981), so treat the numbers as indicative, not definitive.
 
-## Status of the draft
+## Dataset
 
-Real, from your notebook run: dataset counts, patient-level split (2,650 groups; 4,489 train / 743 val; zero overlap), training setup, threshold (0.363), and test results (sensitivity 0.995, specificity 0.709, precision 0.851, NPV 0.988, accuracy 0.888, F1 0.917, ROC-AUC 0.981; confusion matrix 166/68/2/388).
+[Chest X-Ray Images (Pneumonia)](https://www.kaggle.com/datasets/paultimothymooney/chest-xray-pneumonia) from Kaggle (Kermany et al., *Cell*, 2018): 5,856 pediatric (ages 1-5) anterior-posterior chest radiographs from one medical centre, labelled NORMAL (0) or PNEUMONIA (1).
 
-Red **[TBD]** marks mean the result needs the extra experiments. Nothing there is invented. Search `main.tex` for `\tbd` and `\TBD` to find them all. When everything is filled in, redefine both macros in the preamble to print nothing.
+| Official split | NORMAL | PNEUMONIA |
+|---|---|---|
+| train | 1,341 | 3,875 |
+| val | 8 | 8 |
+| test | 234 | 390 |
 
-## Running the extra experiments
+The notebook downloads the dataset automatically through the Kaggle API (see Setup).
 
-`swin_extra_experiments.py` is written as `# %%` blocks to paste at the **end of your original notebook**, in the same session. It relies on variables defined there (`train_df`, `val_df`, `test_df`, `XrayDataset`, `train_tf`, `eval_tf`, `device`, `SEED`, `class_w`). Block 6 also needs `pip install grad-cam`. Reduce `SEEDS` or `MODELS` first if time is short; the full grid takes several GPU-hours.
+## Pipeline
 
-| Block | What it does | Output files | Where it goes in the paper |
-|---|---|---|---|
-| 1 | Baselines (ResNet-50, DenseNet-121, EfficientNet-B0, ViT-B/16, Swin-T), 5 seeds | `table4_baselines.csv`, `results_baselines_all_seeds.csv` | Baseline table (Sec. 6.2) |
-| 2 | Ablations: pretrained vs. scratch, weighted vs. unweighted | `table5_ablation.csv` | Ablation table (Sec. 6.3) |
-| 3 | Bootstrap 95% CIs, validation-vs-test AUC gap | `table2_ci.csv` | Main-results table (Sec. 6.1, 6.5) |
-| 4 | ROC/PR curves, calibration (ECE, Brier) | `fig_roc_pr.png`, `fig_calibration.png` | Sec. 6.4: upload to `figures/` and uncomment the two figure blocks |
-| 5 | False-positive and false-negative analysis | `table6_fp_vs_tn.csv`, `false_positives.csv`, `false_negatives.csv`, `fig_fp_gallery.png` | Sec. 6.7: the text references these, but you still need to add the table and figure |
-| 6 | Shortcut check: Grad-CAM mass on borders/corners, occlusion test | `shortcut_check.csv` | Sec. 6.6 |
-| 7 | Optional lung-centred-crop experiment (stub only; not implemented) | none | Extra ablation row |
+The notebook (`swin_pneumonia.ipynb`) runs these steps in order:
 
-Block 1 also saves `swin_t_seed0.pt`, which block 6 loads.
+1. **Dataset setup:** download the data via the Kaggle API.
+2. **Data loading:** build `data.csv` (path, label, class, split).
+3. **EDA:** class balance per split and image-size statistics.
+4. **Visualisation:** sample X-rays and pixel-intensity histograms.
+5. **Bad-image removal:** drop unreadable, tiny (<64 px) or blank images (none were removed).
+6. **Data selection:** merge the 16-image official `val` into `train` to form a development pool; keep `test` held out.
+7. **Normalisation:** resize to 224×224, ImageNet mean/std.
+8. **Patch and window illustration:** 4×4 patches, 7×7-token attention windows.
+9. **Patient-level split:** patient IDs parsed from filenames; `StratifiedGroupKFold` (7 folds, one used for validation); asserts zero patient overlap.
+10. **Class-imbalance handling:** class-weighted cross-entropy (weights 2.84 : 1.00); augmentation on training images only.
+11. **Model:** torchvision `swin_t` with ImageNet weights, new `Linear(768, 2)` head (27.5 M parameters).
+12. **Training:** AdamW, cosine schedule, mixed precision; the best-validation-AUC checkpoint is saved.
+13. **Prediction scores:** pneumonia probability histograms.
+14. **Threshold selection:** the highest validation threshold that still reaches 95% recall.
+15. **Test evaluation:** run once at the fixed threshold.
+16. **Confusion matrix.**
+17. **Grad-CAM:** heatmaps for 4 correct and 4 incorrect test predictions.
 
-## Important caveats
+## Setup
 
-- **Shortcut cues:** your Grad-CAM panel shows strong activation on the "R" marker, borders and corners, even for correct predictions. The paper reports this as a limitation. Run block 6 before deciding how strongly to word it.
-- **Validation-test gap:** validation AUC is 0.999 vs. 0.981 on test. The paper hypothesises distribution shift; that claim is marked for verification.
-- **Patient IDs are inferred from filenames**, not from official metadata, so residual leakage is possible.
-- **Baseline fairness:** torchvision's `DEFAULT` weights come from different training recipes across models (for example ResNet-50 uses ImageNet1K_V2). State this in the paper.
-- **References:** check every entry in `references.bib` against the original source, and add 4-6 prior papers on this dataset with their reported metrics (marked `\tbd` in Related Work).
-- **Not for clinical use:** the model has not been clinically validated.
+**Recommended: Google Colab with a GPU runtime** (the notebook uses `/content/data` paths).
 
-## Placeholders to complete
+1. Open `swin_pneumonia.ipynb` in Colab and select **Runtime → Change runtime type → GPU**.
+2. Create a Kaggle API token (Kaggle → Settings → API). Paste it when the dataset cell prompts you. It is read with `getpass`, so it is not stored in the notebook.
+3. Run all cells top to bottom.
 
-Author names and affiliations, GPU model, repository link, and (if targeting a venue) the venue's LaTeX template.
+**Dependencies** (the first cell installs `kaggle` and `grad-cam`; everything else is preinstalled on Colab):
+`torch`, `torchvision`, `scikit-learn`, `pandas`, `numpy`, `matplotlib`, `pillow`, `kaggle`, `grad-cam`
+
+**Running locally:** change `DATA_DIR` in the dataset cell to a local folder and install the packages above. A CUDA GPU is strongly recommended; on CPU, training will be very slow.
+
+If you hit an out-of-memory error, set `BS = 16` in the data-loader cell.
+
+## Outputs
+
+| File | Description |
+|---|---|
+| `data.csv` | Image path, label, class and official split for every image |
+| `swin_t_best.pt` | Best checkpoint (by validation ROC-AUC) |
+| `results.csv` | Test metrics for the final model |
+| `confusion_matrix.png` | Test confusion matrix |
+| `gradcam_swin.png` | Grad-CAM panel (4 correct, 4 incorrect predictions) |
+
+## Key settings
+
+| Setting | Value |
+|---|---|
+| Input size | 224 × 224 |
+| Optimiser | AdamW, lr 3e-5, weight decay 0.05 |
+| Schedule | Cosine annealing, 10 epochs |
+| Batch size | 32 (training), 64 (evaluation) |
+| Loss | Cross-entropy, class weights (2.84, 1.00) |
+| Augmentation | Rotation ≤10°, random resized crop (0.9-1.0), brightness 0.1; no horizontal flip |
+| Seed | 42 |
+| Validation split | 1 of 7 `StratifiedGroupKFold` folds: 4,489 train / 743 val |
+
+## Known limitations
+
+- **Possible shortcut learning:** the Grad-CAM panel shows strong activation on the "R" laterality marker, image borders and corners, even for correct predictions. The model may partly rely on non-lung cues.
+- **Validation-test gap** (AUC 0.999 vs. 0.981; validation precision 1.0 vs. test 0.851): the 68 false positives suggest the threshold does not transfer perfectly.
+- **Patient IDs are inferred from filenames** (`personNNN`, `IM-NNNN`); residual leakage is possible if these do not uniquely identify patients.
+- **Single run:** one seed, one validation fold, no confidence intervals.
+- **Narrow data:** single-centre, pediatric, anterior-posterior images only; results will not generalise to adults or other hospitals without external validation.
+- **Binary task:** bacterial and viral pneumonia are not distinguished.
+
+## Suggested extensions
+
+`swin_extra_experiments.py` adds blocks (paste at the end of the notebook, same session) for CNN/ViT baselines, pretrained-vs-scratch and class-weight ablations, multi-seed runs, bootstrap confidence intervals, ROC/PR and calibration plots, false-positive analysis and a quantitative border/corner shortcut check. It needs the notebook's variables (`train_df`, `val_df`, `test_df`, `XrayDataset`, `train_tf`, `eval_tf`, `device`, `SEED`, `class_w`) and `grad-cam` installed.
+
+## References
+
+- D. S. Kermany et al., *Identifying Medical Diagnoses and Treatable Diseases by Image-Based Deep Learning*, Cell 172(5), 2018.
+- Z. Liu et al., *Swin Transformer: Hierarchical Vision Transformer Using Shifted Windows*, ICCV 2021.
+- R. R. Selvaraju et al., *Grad-CAM: Visual Explanations from Deep Networks via Gradient-Based Localization*, ICCV 2017.
+
+## License and acknowledgements
+
+Add your license here. The dataset is subject to its own terms on Kaggle (Kermany et al.). Model weights come from torchvision's ImageNet-pretrained Swin-T.
